@@ -29,8 +29,8 @@ import type { MixMaterial } from "./mixology/types";
 const SOURCE_KEY = "ai_phone_resource_hub_source_v1";
 registerKvMigration(SOURCE_KEY);
 
-// 六个镜像逐个试，超时设小一点：一个镜像卡住只会拖 8 秒就换下一个，
-// 而不是 15 秒 ×6。只卡连接建立，不影响大文件本身的下载。
+// 多个镜像逐个试，超时设小一点：一个镜像卡住只会拖 8 秒就换下一个，
+// 而不是 15 秒 ×N。只卡连接建立，不影响大文件本身的下载。
 const FETCH_TIMEOUT_MS = 8000;
 
 // ── 源配置 ──
@@ -120,14 +120,31 @@ const RAW_PROXY_PREFIXES = [
     "https://ghproxy.net/",
 ];
 
+/**
+ * 本站自己的服务端取件代理（app/api/resource-hub/proxy/route.ts）。
+ * 浏览器能打开本站页面，就一定连得上本站域名——所以这条是最可靠的兜底：
+ * 由服务端去访问 raw/jsDelivr，再把内容从本站域名下发。
+ */
+function serverProxyUrl(source: ResourceHubSource, path: string): string {
+    const origin = typeof window !== "undefined" && window.location?.origin ? window.location.origin : "";
+    const query = new URLSearchParams({
+        owner: source.owner,
+        repo: source.repo,
+        ref: effectiveRef(source),
+        path: path.replace(/^\/+/, ""),
+    });
+    return `${origin}/api/resource-hub/proxy?${query.toString()}`;
+}
+
 function buildMirrorUrls(source: ResourceHubSource, path: string): string[] {
     const { owner, repo } = source;
     const ref = effectiveRef(source);
     const clean = encodePath(path);
     const raw = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${clean}`;
     return [
-        // 国内代理优先：封面图只走第一个（<img> 不会自己换下一条），
-        // 所以第一位必须是当前网络下最可能通的那个。
+        // 封面图只走第一个（<img> 不会自己换下一条），所以第一位必须最可靠：
+        // 直连 CDN 在国内经常整域名不通，本站服务端代理才是兜底的那条。
+        serverProxyUrl(source, path),
         ...RAW_PROXY_PREFIXES.map(prefix => `${prefix}${raw}`),
         `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${clean}`,
         `https://fastly.jsdelivr.net/gh/${owner}/${repo}@${ref}/${clean}`,
