@@ -35,6 +35,18 @@ type Upstream = {
     build: (owner: string, repo: string, ref: string, path: string) => string;
 };
 
+/** 文件名里的引号/换行会破坏 Content-Disposition 头，一律清掉 */
+function sanitizeFilename(raw: string): string {
+    const cleaned = raw.replace(/[\\/\r\n"]/g, "_").trim();
+    return cleaned.slice(0, 120) || "resource";
+}
+
+/** 老浏览器只认 filename= 里的 ASCII，非 ASCII 用 _ 顶替，中文名走 filename* 那半 */
+function asciiFallback(filename: string): string {
+    // eslint-disable-next-line no-control-regex
+    return filename.replace(/[^\x20-\x7e]/g, "_");
+}
+
 // 服务端一般不在这三个域名上受限，raw 优先（无 20MB 限制），jsDelivr 兜底其 CDN 缓存。
 const UPSTREAMS: Upstream[] = [
     { name: "raw", build: (o, r, ref, p) => `https://raw.githubusercontent.com/${o}/${r}/${ref}/${p}` },
@@ -48,6 +60,8 @@ export async function GET(request: NextRequest) {
     const repo = (params.get("repo") ?? "").trim();
     const ref = (params.get("ref") ?? "main").trim();
     const path = safePath(params.get("path"));
+    // download=1 时响应带 Content-Disposition: attachment，浏览器当文件下载处理
+    const isDownload = params.get("download") === "1";
 
     if (!OWNER_RE.test(owner) || !REPO_RE.test(repo) || !REF_RE.test(ref) || !path) {
         return NextResponse.json({ error: "资源代理参数不合法" }, { status: 400 });
@@ -78,6 +92,15 @@ export async function GET(request: NextRequest) {
             headers.set("X-Content-Type-Options", "nosniff");
             const length = res.headers.get("Content-Length");
             if (length) headers.set("Content-Length", length);
+
+            // download=1：带上附件头，浏览器按普通文件下载接管。
+            // 这是集市「下载」按钮的唯一路径——前端不再 fetch 整份进内存再造 blob，
+            // 那样在安装成 PWA 的安卓窗口里点了没反应，大文件还会被超时截断。
+            if (isDownload) {
+                const fallbackName = path.split("/").pop() || "resource";
+                const filename = sanitizeFilename(params.get("filename") || fallbackName);
+                headers.set("Content-Disposition", `attachment; filename="${asciiFallback(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+            }
             return new Response(res.body, { status: 200, headers });
         } catch (err) {
             lastError = `${upstream.name} ${err instanceof Error ? err.message : String(err)}`;

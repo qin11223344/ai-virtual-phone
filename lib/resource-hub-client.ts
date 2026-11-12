@@ -152,9 +152,12 @@ function buildMirrorUrls(source: ResourceHubSource, path: string): string[] {
     ];
 }
 
-async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+/** 文本/图片走短超时；二进制取件要单独放宽，见 fetchResourceHubBinary。 */
+const BINARY_FETCH_TIMEOUT_MS = 60000;
+
+async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         return await fetch(url, { ...init, signal: controller.signal, cache: "no-cache" });
     } finally {
@@ -162,18 +165,22 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
     }
 }
 
-async function fetchMirrored(source: ResourceHubSource, path: string): Promise<Response> {
-    let lastError: Error = new Error("无可用镜像");
+async function fetchMirrored(source: ResourceHubSource, path: string, timeoutMs = FETCH_TIMEOUT_MS): Promise<Response> {
+    // 每一级的失败原因都记下来：以前只抛最后一条，而最后一条恰好是直连
+    // raw.githubusercontent.com 的 "Failed to fetch"，把真正的根因全盖住了。
+    const failures: string[] = [];
     for (const url of buildMirrorUrls(source, path)) {
         try {
-            const res = await fetchWithTimeout(url);
+            const res = await fetchWithTimeout(url, undefined, timeoutMs);
             if (res.ok) return res;
-            lastError = new Error(`HTTP ${res.status}`);
+            failures.push(`HTTP ${res.status}`);
         } catch (err) {
-            lastError = err instanceof Error ? err : new Error(String(err));
+            failures.push(err instanceof Error
+                ? (err.name === "AbortError" ? "超时" : err.message)
+                : String(err));
         }
     }
-    throw lastError;
+    throw new Error(`无可用镜像（${failures.join(" / ")}）`);
 }
 
 /** 逐镜像尝试拉取文本；全部失败抛最后一个错误。 */
@@ -181,9 +188,9 @@ export async function fetchResourceHubText(source: ResourceHubSource, path: stri
     return (await fetchMirrored(source, path)).text();
 }
 
-/** 二进制拉取（角色卡 PNG、应用 zip）。 */
+/** 二进制拉取（角色卡 PNG、应用 zip、表情包）。超时放宽到 60 秒。 */
 export async function fetchResourceHubBinary(source: ResourceHubSource, path: string): Promise<ArrayBuffer> {
-    return (await fetchMirrored(source, path)).arrayBuffer();
+    return (await fetchMirrored(source, path, BINARY_FETCH_TIMEOUT_MS)).arrayBuffer();
 }
 
 /** 图片等资源的展示 URL（仓库相对路径转 CDN 主镜像）。 */
@@ -336,11 +343,25 @@ export async function fetchShareIndex(source: ResourceHubSource): Promise<ShareI
 
 // ── 下载 ──
 
+/**
+ * 下载集市里的一个文件。
+ *
+ * 不走「fetch 整份读进内存 → blob → a.click()」那条老路：在安装成 PWA 的安卓窗口里
+ * blob 下载常常不被接管（点了没反应），而且大文件要整份驻留内存、还会被连接超时中断。
+ * 改成让浏览器直接访问本站服务端代理的下载版（响应带 Content-Disposition: attachment），
+ * 由浏览器当普通文件下载处理：不限体积、不占页面内存，PWA/普通标签页都能接。
+ */
 export async function downloadResourceHubFile(source: ResourceHubSource, path: string): Promise<void> {
-    const buffer = await fetchResourceHubBinary(source, path);
     const filename = stripAssetImageMark(path.split("/").pop() || "resource");
-    const { downloadFile } = await import("./download-utils");
-    await downloadFile(new Blob([buffer]), filename);
+    const url = `${serverProxyUrl(source, path)}&download=1&filename=${encodeURIComponent(filename)}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    // 有 download 属性时浏览器优先按附件保存；服务端的 attachment 头是更强的兜底。
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
 }
 
 // ── 导入 ──
