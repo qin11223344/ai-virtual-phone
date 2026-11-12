@@ -29,7 +29,9 @@ import type { MixMaterial } from "./mixology/types";
 const SOURCE_KEY = "ai_phone_resource_hub_source_v1";
 registerKvMigration(SOURCE_KEY);
 
-const FETCH_TIMEOUT_MS = 15000;
+// 六个镜像逐个试，超时设小一点：一个镜像卡住只会拖 8 秒就换下一个，
+// 而不是 15 秒 ×6。只卡连接建立，不影响大文件本身的下载。
+const FETCH_TIMEOUT_MS = 8000;
 
 // ── 源配置 ──
 
@@ -107,14 +109,29 @@ async function resolveLatestSha(source: ResourceHubSource): Promise<string | nul
     return null;
 }
 
+/**
+ * GitHub 文件代理前缀（国内可直连，透传 raw 内容且带 CORS 头）。
+ * jsDelivr 与 raw.githubusercontent.com 在国内经常整域名不通，一通全挂，
+ * 所以这些前缀排在前面。域名会不定期失效，挂了就在这里换一批。
+ */
+const RAW_PROXY_PREFIXES = [
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+    "https://ghproxy.net/",
+];
+
 function buildMirrorUrls(source: ResourceHubSource, path: string): string[] {
     const { owner, repo } = source;
     const ref = effectiveRef(source);
     const clean = encodePath(path);
+    const raw = `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${clean}`;
     return [
+        // 国内代理优先：封面图只走第一个（<img> 不会自己换下一条），
+        // 所以第一位必须是当前网络下最可能通的那个。
+        ...RAW_PROXY_PREFIXES.map(prefix => `${prefix}${raw}`),
         `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${clean}`,
         `https://fastly.jsdelivr.net/gh/${owner}/${repo}@${ref}/${clean}`,
-        `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/${clean}`,
+        raw,
     ];
 }
 
